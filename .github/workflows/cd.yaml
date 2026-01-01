@@ -1,0 +1,68 @@
+name: Production CD
+on:
+  push:
+    branches:
+      - main
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    env:
+      TERRAFORM_DIR: terraform
+      NAMESPACE: audio-prod             # Per Env prod/staging/dev
+      INGRESS_HOST: ${{ secrets.INGRESS_HOST }}
+      TLS_SECRET: ${{ secrets.TLS_SECRET }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_DEPLOY_ROLE }}
+          aws-region: us-east-1
+
+      - uses: hashicorp/setup-terraform@v2
+        with:
+          terraform_version: 1.5.0
+
+      - name: Install Helm
+        run: |
+          curl https://raw.githubusercontent.com/helm/helm/main/scripts/get-helm-3 | bash
+
+      - name: Terraform Init
+        working-directory: ${{ env.TERRAFORM_DIR }}
+        run: terraform init
+
+      - name: Get Terraform Outputs
+        working-directory: ${{ env.TERRAFORM_DIR }}
+        id: tf_output
+        run: |
+          echo "ecr_algo=$(terraform output -raw ecr_algorithm_a)" >> $GITHUB_ENV
+          echo "ecr_rest=$(terraform output -raw ecr_rest_api)" >> $GITHUB_ENV
+          echo "ecr_writer=$(terraform output -raw ecr_datawriter)" >> $GITHUB_ENV
+      - name: Deploy RabbitMQ
+        run: |
+          helm upgrade --install rabbitmq ./helm/rabbitmq \
+            --namespace $NAMESPACE --create-namespace --wait
+
+      - name: Deploy Algorithm-A
+        run: |
+          helm upgrade --install algorithm-a ./helm/algorithm-a \
+            --namespace $NAMESPACE --wait \
+            --set image.repository=$ecr_algo \
+            --set image.tag=${GITHUB_SHA}
+
+      - name: Deploy DataWriter
+        run: |
+          helm upgrade --install datawriter ./helm/datawriter \
+            --namespace $NAMESPACE --wait \
+            --set image.repository=$ecr_writer \
+            --set image.tag=${GITHUB_SHA}
+
+      - name: Deploy RestAPI
+        run: |
+          helm upgrade --install rest-api ./helm/rest-api \
+            --namespace $NAMESPACE --wait \
+            --set image.repository=$ecr_rest \
+            --set image.tag=${GITHUB_SHA} \
+            --set ingress.host=$INGRESS_HOST \
+            --set ingress.tls[0].secretName=$TLS_SECRET
